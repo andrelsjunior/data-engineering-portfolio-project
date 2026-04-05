@@ -445,6 +445,77 @@ def scrape(
     return all_listings
 
 
+def _extract_detail_page(playwright_page: Page) -> dict:
+    """
+    Extract enrichment fields from a loaded OLX property detail page.
+
+    Returns a dict with keys:
+        ad_id, cep, city, state, description,
+        amenidades_imovel (list[str]), amenidades_condominio (list[str]),
+        seller_type ("PROFISSIONAL" | "PARTICULAR" | None), seller_name.
+
+    All fields are nullable — never raises; missing data returns None / [].
+    """
+    return playwright_page.evaluate(r"""() => {
+        const text = document.body.innerText;
+
+        // Ad ID: trailing digits in the URL path
+        const ad_id = window.location.pathname.match(/(\d+)$/)?.[1] ?? null;
+
+        // CEP: 8 digits or NNNNN-NNN anywhere in the body
+        const cepMatch = text.match(/\b(\d{5}-?\d{3})\b/);
+        const cep = cepMatch ? cepMatch[1].replace('-', '') : null;
+
+        // City and state: "City Name, UF, NNNNN" on one line (no newlines in city)
+        const locMatch = text.match(/([A-ZÀ-Ú][a-zà-ú]+(?:[^\S\n][A-ZÀ-Ú][a-zà-ú]+)*),\s*([A-Z]{2}),\s*\d{5}/);
+        const city  = locMatch ? locMatch[1].trim() : null;
+        const state = locMatch ? locMatch[2] : null;
+
+        // Description: content between the ad-code line and the first stop marker
+        const descMatch = text.match(
+            /Código do anúncio:[^\n]*\n([\s\S]*?)(?=Ver descrição completa|Consórcio fácil|Localização\n|Detalhes\n)/
+        );
+        const description = descMatch ? descMatch[1].trim() || null : null;
+
+        // Amenidades do imóvel (property features list)
+        const amenImovelMatch = text.match(
+            /Características do imóvel\n([\s\S]*?)(?=Características do condomínio|R\$\s*[\d.,]|Simular|\n{2,}|$)/
+        );
+        const amenidades_imovel = amenImovelMatch
+            ? amenImovelMatch[1].trim().split('\n').map(s => s.trim()).filter(Boolean)
+            : [];
+
+        // Amenidades do condomínio (condo features list)
+        const amenCondMatch = text.match(
+            /Características do condomínio\n([\s\S]*?)(?=R\$\s*[\d.,]|Simular|\n{2,}|$)/
+        );
+        const amenidades_condominio = amenCondMatch
+            ? amenCondMatch[1].trim().split('\n').map(s => s.trim()).filter(Boolean)
+            : [];
+
+        // Seller type
+        const sellerTypeMatch = text.match(/\b(PROFISSIONAL|PARTICULAR)\b/);
+        const seller_type = sellerTypeMatch ? sellerTypeMatch[1] : null;
+
+        // Seller name: first non-empty line after the type label
+        const sellerNameMatch = text.match(/(?:PROFISSIONAL|PARTICULAR)\n([^\n]+)/);
+        const seller_name = sellerNameMatch ? sellerNameMatch[1].trim() : null;
+
+        return {
+            ad_id, cep, city, state, description,
+            amenidades_imovel, amenidades_condominio,
+            seller_type, seller_name,
+        };
+    }""")
+
+
+_EMPTY_DETAIL: dict = {
+    "ad_id": None, "cep": None, "city": None, "state": None,
+    "description": None, "amenidades_imovel": [], "amenidades_condominio": [],
+    "seller_type": None, "seller_name": None,
+}
+
+
 def scrape_detail_pages(
     listings: list[dict],
     *,
@@ -452,10 +523,12 @@ def scrape_detail_pages(
 ) -> list[dict]:
     """
     Visit individual OLX property pages to enrich listings with:
-    CEP, amenidades (imóvel + condomínio), full description, ad_id.
+    CEP, amenidades (imóvel + condomínio), full description, ad_id,
+    city, state, seller_type, seller_name.
 
     Batches of DETAIL_BATCH_SIZE with DETAIL_INTER_BATCH_SECS pause between batches.
-    Skips blocked pages (logs warning, continues).
+    Skips blocked pages (logs warning, continues) — blocked listings receive
+    null values for all enrichment fields so the output schema is consistent.
 
     Uses a fresh browser context (separate from the listing scrape session) to
     avoid tying detail-page activity to the listing-page fingerprint.
@@ -470,7 +543,7 @@ def scrape_detail_pages(
         for i, listing in enumerate(listings):
             detail_url = listing.get("url")
             if not detail_url:
-                enriched.append(listing)
+                enriched.append({**_EMPTY_DETAIL, **listing})
                 continue
 
             # Intra-batch delay (skip first item)
@@ -495,17 +568,17 @@ def scrape_detail_pages(
 
                 if _is_blocked(page):
                     logger.warning("Block detected on detail page %s — skipping", detail_url)
-                    enriched.append(listing)
+                    enriched.append({**_EMPTY_DETAIL, **listing})
                     continue
 
                 _simulate_reading(page)
 
-                # TODO: extract CEP, amenidades, descrição, ad_id from detail page
-                enriched.append(listing)
+                detail = _extract_detail_page(page)
+                enriched.append({**listing, **detail})
 
             except Exception as exc:
                 logger.warning("Failed to fetch detail page %s: %s", detail_url, exc)
-                enriched.append(listing)
+                enriched.append({**_EMPTY_DETAIL, **listing})
 
         browser.close()
 
@@ -532,6 +605,7 @@ def main() -> None:
     parser.add_argument("--no-headless", action="store_true", help="Show browser window")
     parser.add_argument("--no-polite", action="store_true", help="Disable jitter/scroll (fast local testing)")
     parser.add_argument("--dedup", action="store_true", help="Collapse re-listings of same property")
+    parser.add_argument("--enrich", action="store_true", help="Visit detail pages to add CEP, amenidades, description")
     args = parser.parse_args()
 
     listings = scrape(
@@ -541,6 +615,9 @@ def main() -> None:
         dedup=args.dedup,
         polite_mode=not args.no_polite,
     )
+
+    if args.enrich:
+        listings = scrape_detail_pages(listings, headless=not args.no_headless)
 
     output = json.dumps(listings, ensure_ascii=False, indent=2)
 
