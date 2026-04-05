@@ -47,9 +47,17 @@ def _ensure_schema(conn: duckdb.DuckDBPyConnection) -> None:
             date_listed     TEXT,
             scraped_at      TEXT,
             listing_count   INTEGER,
-            price_history   TEXT
+            price_history   TEXT,
+            description     TEXT,
+            keywords        TEXT
         )
     """)
+    # Migration: add columns to pre-existing databases that lack them
+    for col, dtype in [("description", "TEXT"), ("keywords", "TEXT")]:
+        try:
+            conn.execute(f"ALTER TABLE listings ADD COLUMN {col} {dtype}")
+        except Exception:
+            pass  # column already exists
     conn.execute("""
         CREATE TABLE IF NOT EXISTS duplicate_groups (
             listing_url  TEXT PRIMARY KEY,
@@ -85,6 +93,7 @@ def load_json(path: str | pathlib.Path) -> int:
             _q(r.get("rooms")), _q(r.get("bathrooms")), _q(r.get("garage_spots")),
             _n(r.get("iptu_brl")), _n(r.get("condo_fee_brl")), _q(r.get("date_listed")),
             _q(r.get("scraped_at")), _n(r.get("listing_count")), _q(r.get("price_history")),
+            _q(r.get("description")),
         ]) + ")"
         for r in records
     )
@@ -96,11 +105,18 @@ def load_json(path: str | pathlib.Path) -> int:
                 url, title, price_brl, price_per_m2, area_m2,
                 rooms, bathrooms, garage_spots,
                 iptu_brl, condo_fee_brl, date_listed,
-                scraped_at, listing_count, price_history
+                scraped_at, listing_count, price_history,
+                description
             )
         """ % values_sql)
         conn.execute("""
-            INSERT INTO listings
+            INSERT INTO listings (
+                url, title, price_brl, price_per_m2, area_m2,
+                rooms, bathrooms, garage_spots,
+                iptu_brl, condo_fee_brl, date_listed,
+                scraped_at, listing_count, price_history,
+                description
+            )
             SELECT * FROM _load
             ON CONFLICT (url) DO UPDATE SET
                 title          = excluded.title,
@@ -115,7 +131,9 @@ def load_json(path: str | pathlib.Path) -> int:
                 date_listed    = excluded.date_listed,
                 scraped_at     = excluded.scraped_at,
                 listing_count  = excluded.listing_count,
-                price_history  = excluded.price_history
+                price_history  = excluded.price_history,
+                description    = excluded.description
+                -- keywords intentionally excluded: preserved across reloads
         """)
 
     return len(records)
@@ -133,6 +151,16 @@ def assign_group(urls: list[str], group_id: str, group_label: str | None) -> Non
                     group_label = excluded.group_label,
                     marked_at   = now()
             """, [url, group_id, group_label])
+
+
+def update_keywords(url_kw_pairs: list[tuple[str, list[str]]]) -> None:
+    """Batch-update the keywords JSON column for a list of (url, keywords) pairs."""
+    with _connect() as conn:
+        for url, kws in url_kw_pairs:
+            conn.execute(
+                "UPDATE listings SET keywords = ? WHERE url = ?",
+                [json.dumps(kws, ensure_ascii=False), url],
+            )
 
 
 def remove_from_group(url: str) -> None:
