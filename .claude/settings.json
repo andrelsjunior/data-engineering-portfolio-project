@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'f=$(jq -r \".tool_input.file_path // empty\"); case \"$f\" in *.py) ruff format \"$f\" 2>/dev/null || true;; esac'",
+            "timeout": 10,
+            "statusMessage": "Formatting Python file..."
+          }
+        ]
+      }
+    ]
+  }
+}
