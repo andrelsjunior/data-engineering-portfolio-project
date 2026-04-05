@@ -18,6 +18,9 @@ venv/
 .env.*
 !.env.example
 
+# Data — scraper output, DuckDB files, test screenshots
+data/
+
 # dbt
 dbt/target/
 dbt/dbt_packages/

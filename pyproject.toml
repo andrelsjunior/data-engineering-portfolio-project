@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "data-engineering-portfolio"
@@ -11,6 +11,8 @@ dependencies = [
     "dbt-bigquery>=1.8",
     "google-cloud-bigquery>=3.0",
     "duckdb>=1.0",
+    "playwright>=1.44",
+    "streamlit>=1.35",
 ]
 
 [project.optional-dependencies]
@@ -20,6 +22,10 @@ dev = [
     "pytest>=8.0",
     "pytest-cov",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
 
 [tool.ruff]
 line-length = 100
